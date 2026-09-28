@@ -1,0 +1,584 @@
+{
+  "name": "Telegram AI Flight Finder - Production Template",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ]
+      },
+      "id": "tg-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const update = $input.first().json;\nconst message = update.message || update.edited_message || {};\nconst callback = update.callback_query || {};\nconst chatId = message.chat?.id ?? callback.message?.chat?.id;\nif (chatId === undefined || chatId === null) {\n  throw new Error('Telegram update did not contain a chat ID.');\n}\nreturn [{ json: {\n  chat_id: chatId,\n  user_text: message.text || message.caption || '',\n  callback_data: callback.data || null,\n  callback_query_id: callback.id || null,\n  message_id: message.message_id ?? callback.message?.message_id ?? null,\n  action: callback.data || 'search',\n  received_at: new Date().toISOString()\n} }];"
+      },
+      "id": "normalize",
+      "name": "Normalize Telegram Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -980,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{!!$json.callback_query_id}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "is-callback",
+      "name": "Is Callback Query",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -760,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/answerCallbackQuery",
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={{JSON.stringify({callback_query_id:$json.callback_query_id})}}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "answer-callback",
+      "name": "Acknowledge Telegram Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first().json;\nconst callback = input.callback_data;\nreturn [{ json: {\n  chat_id: input.chat_id,\n  user_text: input.user_text || callback || '',\n  action: callback || 'search',\n  callback_data: callback,\n  message_id: input.message_id,\n  state_key: String(input.chat_id)\n} }];"
+      },
+      "id": "prepare-agent",
+      "name": "Prepare AI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first().json;\nconst store = $getWorkflowStaticData('global');\nstore.chats = store.chats || {};\nconst previous = store.chats[String(input.chat_id)] || {};\nreturn [{ json: { ...input, previous_context: previous } }];"
+      },
+      "id": "memory-load",
+      "name": "Load Conversation Memory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -520,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_OPENAI_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={{JSON.stringify({model:'gpt-4.1-mini',temperature:0,response_format:{type:'json_object'},messages:[{role:'system',content:'Extract a flight search request and return one JSON object only. Fields: origin_city, origin_iata, destination_city, destination_iata, departure_date (YYYY-MM-DD), return_date (YYYY-MM-DD or null), trip_type (one_way or round_trip), passengers (integer 1-9), cabin_class (economy, premium_economy, business, first), currency (3-letter code), max_price (number or null), direct_only (boolean), sort (price or recommended), user_language (ar or en). Understand Arabic route forms such as من إسطنبول إلى الدوحة and dates such as 15-10-2026 or 2026-10-15. Map common Arabic city names when certain: إسطنبول/Istanbul=IST, الدوحة/Doha=DOH, لندن/London=LON, باريس/Paris=PAR, الرياض/Riyadh=RUH, القاهرة/Cairo=CAI. Return dates as YYYY-MM-DD. Merge omitted fields from previous_context. Never invent an IATA code, date, or maximum price. If the user provides a callback action, preserve the route and dates from previous_context; callback filter actions are applied by the workflow.'},{role:'user',content:JSON.stringify({message:$json.user_text,action:$json.action,previous_context:$json.previous_context})}]})}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "ai-parser",
+      "name": "Parse Flight Request (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -280,
+        -40
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json || {};\nconst base = $node['Load Conversation Memory'].json || {};\nconst action = base.action || 'search';\nconst previous = base.previous_context || {};\nlet parsed = {};\nlet parse_error = false;\nconst content = response.choices?.[0]?.message?.content;\nif (action === 'direct') parsed = { ...previous, direct_only: true };\nelse if (action === 'cheapest') parsed = { ...previous, sort: 'price' };\nelse if (action === 'change_date') parsed = { ...previous, departure_date: null, return_date: null, needs_date: true };\nelse if (action === 'new_search') parsed = {};\nelse if (content) { try { parsed = { ...previous, ...JSON.parse(content) }; } catch (error) { parse_error = true; parsed = { ...previous }; } }\nelse { parse_error = true; parsed = { ...previous }; }\nconst userText = String(base.user_text || '');\nconst normalize = value => String(value || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f\\u064b-\\u065f\\u0670\\u0640]/g, '').replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)));\nconst cities = [\n  { iata:'IST', city:'Istanbul', aliases:['اسطنبول','إسطنبول','استانبول','istanbul'] },\n  { iata:'DOH', city:'Doha', aliases:['الدوحه','الدوحة','دوحه','دوحة','doha'] },\n  { iata:'LON', city:'London', aliases:['لندن','london'] },\n  { iata:'PAR', city:'Paris', aliases:['باريس','paris'] },\n  { iata:'RUH', city:'Riyadh', aliases:['الرياض','رياض','riyadh'] },\n  { iata:'CAI', city:'Cairo', aliases:['القاهره','القاهرة','قاهره','قاهرة','cairo'] },\n  { iata:'DXB', city:'Dubai', aliases:['دبي','dubai'] },\n  { iata:'AUH', city:'Abu Dhabi', aliases:['ابوظبي','أبوظبي','ابو ظبي','abu dhabi'] },\n  { iata:'JED', city:'Jeddah', aliases:['جده','جدة','jeddah'] },\n  { iata:'MED', city:'Medina', aliases:['المدينه','المدينة','المدينه المنوره','المدينة المنورة','medina'] },\n  { iata:'AMM', city:'Amman', aliases:['عمان','عمّان','amman'] },\n  { iata:'BEY', city:'Beirut', aliases:['بيروت','beirut'] },\n  { iata:'KWI', city:'Kuwait City', aliases:['الكويت','مدينة الكويت','kuwait'] },\n  { iata:'MCT', city:'Muscat', aliases:['مسقط','muscat'] },\n  { iata:'IST', city:'Istanbul', aliases:['مطار اسطنبول','مطار إسطنبول'] },\n  { iata:'LHR', city:'London Heathrow', aliases:['هيثرو','heathrow'] },\n  { iata:'CDG', city:'Paris Charles de Gaulle', aliases:['شارل ديغول','شارل ديجول','charles de gaulle'] }\n];\nconst normalizedText = normalize(userText);\nconst findCity = text => { const value = normalize(text); const found = cities.flatMap(city => city.aliases.map(alias => ({ city, alias:normalize(alias) }))).sort((a,b) => b.alias.length-a.alias.length).find(entry => value.includes(entry.alias)); return found ? found.city : null; };\nconst routeMatch = normalizedText.match(/(?:^|\\s)(?:من|from)\\s*(.+?)\\s*(?:الى|الي|to)\\s*(.+?)(?=\\s+(?:بتاريخ|في|يوم|on|date)\\b|[,،\\n]|$)/u);\nif (action === 'search' || action === 'new_search') {\n  if (routeMatch) {\n    const originCity = findCity(routeMatch[1]);\n    const destinationCity = findCity(routeMatch[2]);\n    if (originCity) { parsed.origin_city = originCity.city; parsed.origin_iata = originCity.iata; }\n    if (destinationCity) { parsed.destination_city = destinationCity.city; parsed.destination_iata = destinationCity.iata; }\n  }\n  const digitText = userText.replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)));\n  const dateMatch = digitText.match(/(?:^|\\D)(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})(?!\\d)|(?:^|\\D)(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{4})(?!\\d)/);\n  if (dateMatch) {\n    const year = Number(dateMatch[1] || dateMatch[6]);\n    const month = Number(dateMatch[2] || dateMatch[5]);\n    const day = Number(dateMatch[3] || dateMatch[4]);\n    const date = new Date(Date.UTC(year, month - 1, day));\n    if (date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day) parsed.departure_date = date.toISOString().slice(0,10);\n  }\n}\nif (parsed.origin_iata && !parsed.origin) parsed.origin = parsed.origin_iata;\nif (parsed.destination_iata && !parsed.destination) parsed.destination = parsed.destination_iata;\nif (parsed.origin_iata && parsed.destination_iata && parsed.departure_date) parse_error = false;\nparsed.chat_id = base.chat_id;\nparsed.action = action;\nparsed.state_key = base.state_key;\nparsed.parse_error = parse_error;\nparsed.user_language = parsed.user_language || (/[^\\x00-\\x7F]/.test(userText) ? 'ar' : 'en');\nparsed.trip_type = parsed.trip_type === 'round_trip' ? 'round_trip' : 'one_way';\nparsed.passengers = Math.min(9, Math.max(1, Number(parsed.passengers) || 1));\nparsed.currency = /^[A-Za-z]{3}$/.test(String(parsed.currency || '')) ? String(parsed.currency).toUpperCase() : 'USD';\nparsed.cabin_class = ['economy','premium_economy','business','first'].includes(parsed.cabin_class) ? parsed.cabin_class : 'economy';\nparsed.direct_only = Boolean(parsed.direct_only);\nparsed.sort = parsed.sort === 'recommended' ? 'recommended' : 'price';\nreturn [{ json: parsed }];"
+      },
+      "id": "build-context",
+      "name": "Build Flight Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const x = $input.first().json;\nconst store = $getWorkflowStaticData('global');\nstore.chats = store.chats || {};\nconst fields = ['origin_city','origin_iata','destination_city','destination_iata','departure_date','return_date','trip_type','passengers','cabin_class','currency','direct_only','sort','user_language','max_price'];\nconst context = {};\nfor (const field of fields) { if (x[field] !== undefined) context[field] = x[field]; }\ncontext.updated_at = new Date().toISOString();\nstore.chats[String(x.chat_id)] = context;\nconst missing = [];\nif (!/^[A-Z]{3}$/.test(String(x.origin_iata || '').toUpperCase())) missing.push('origin_iata');\nif (!/^[A-Z]{3}$/.test(String(x.destination_iata || '').toUpperCase())) missing.push('destination_iata');\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(x.departure_date || ''))) missing.push('departure_date');\nif (x.trip_type === 'round_trip' && !/^\\d{4}-\\d{2}-\\d{2}$/.test(String(x.return_date || ''))) missing.push('return_date');\nconst ready = missing.length === 0 && !x.needs_date;\nreturn [{ json: { ...x, origin_iata: String(x.origin_iata || '').toUpperCase(), destination_iata: String(x.destination_iata || '').toUpperCase(), missing_fields: missing, ready } }];"
+      },
+      "id": "validate-request",
+      "name": "Save and Validate Flight Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.ready}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "request-ready",
+      "name": "Request Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google_flights"
+            },
+            {
+              "name": "departure_id",
+              "value": "={{$node['Save and Validate Flight Request'].json.origin_iata}}"
+            },
+            {
+              "name": "arrival_id",
+              "value": "={{$node['Save and Validate Flight Request'].json.destination_iata}}"
+            },
+            {
+              "name": "outbound_date",
+              "value": "={{$node['Save and Validate Flight Request'].json.departure_date}}"
+            },
+            {
+              "name": "type",
+              "value": "={{$node['Save and Validate Flight Request'].json.trip_type === 'round_trip' ? '1' : '2'}}"
+            },
+            {
+              "name": "return_date",
+              "value": "={{$node['Save and Validate Flight Request'].json.return_date || ''}}"
+            },
+            {
+              "name": "travel_class",
+              "value": "={{({economy:'1',premium_economy:'2',business:'3',first:'4'})[$node['Save and Validate Flight Request'].json.cabin_class] || '1'}}"
+            },
+            {
+              "name": "currency",
+              "value": "={{$node['Save and Validate Flight Request'].json.currency}}"
+            },
+            {
+              "name": "adults",
+              "value": "={{$node['Save and Validate Flight Request'].json.passengers}}"
+            },
+            {
+              "name": "api_key",
+              "value": "YOUR_SERPAPI_API_KEY"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "google-flights",
+      "name": "Search Google Flights (SerpApi)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        -180
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.duffel.com/air/offer_requests",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_DUFFEL_API_TOKEN"
+            },
+            {
+              "name": "Duffel-Version",
+              "value": "v2"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={{JSON.stringify({data:{slices:[{origin:$node['Save and Validate Flight Request'].json.origin_iata,destination:$node['Save and Validate Flight Request'].json.destination_iata,departure_date:$node['Save and Validate Flight Request'].json.departure_date},...($node['Save and Validate Flight Request'].json.trip_type==='round_trip'?[{origin:$node['Save and Validate Flight Request'].json.destination_iata,destination:$node['Save and Validate Flight Request'].json.origin_iata,departure_date:$node['Save and Validate Flight Request'].json.return_date}]:[])],passengers:Array.from({length:$node['Save and Validate Flight Request'].json.passengers},()=>({type:'adult'})),cabin_class:$node['Save and Validate Flight Request'].json.cabin_class},return_offers:true,view:'offers'})}})",
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "duffel-search",
+      "name": "Search Duffel Offers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const request = $('Save and Validate Flight Request').first().json;\nconst google = $('Search Google Flights (SerpApi)').first().json || {};\nconst duffel = $('Search Duffel Offers').first().json || {};\nconst googleGroups = [...(Array.isArray(google.best_flights) ? google.best_flights : []), ...(Array.isArray(google.other_flights) ? google.other_flights : [])];\nlet flights = googleGroups.map(group => {\n  const segments = (Array.isArray(group.flights) ? group.flights : []).map(segment => ({ airline: segment.airline || 'Unknown', flight_number: segment.flight_number || '', departure: segment.departure_airport?.time || null, arrival: segment.arrival_airport?.time || null, from: segment.departure_airport?.id || '', to: segment.arrival_airport?.id || '', duration: segment.duration ?? null }));\n  return { source: 'Google Flights', price: Number(group.price), currency: google.currency || request.currency || 'USD', total_duration: group.total_duration ?? null, stops: Math.max(0, segments.length - 1), segments };\n}).filter(flight => Number.isFinite(flight.price));\nconst offers = Array.isArray(duffel.data?.offers) ? duffel.data.offers : [];\nflights.push(...offers.map(offer => {\n  const slices = Array.isArray(offer.slices) ? offer.slices : [];\n  const segments = slices.flatMap(slice => (Array.isArray(slice.segments) ? slice.segments : []).map(segment => ({ airline: segment.marketing_carrier?.name || segment.operating_carrier?.name || 'Unknown', flight_number: segment.marketing_carrier_flight_number || '', departure: segment.departing_at || null, arrival: segment.arriving_at || null, from: segment.origin?.iata_code || '', to: segment.destination?.iata_code || '', duration: slice.duration || null })));\n  return { source: 'Duffel', offer_id: offer.id || null, price: Number(offer.total_amount), currency: offer.total_currency || request.currency || 'USD', total_duration: slices.map(slice => slice.duration).filter(Boolean).join(' + ') || null, stops: Math.max(0, segments.length - slices.length), segments };\n}).filter(flight => Number.isFinite(flight.price)));\nconst errorText = value => typeof value === 'string' ? value : value?.message || value?.description || null;\nconst providerErrors = [errorText(google.error) || errorText(google.message), errorText(duffel.error) || errorText(duffel.message) || (Array.isArray(duffel.errors) ? duffel.errors.map(errorText).filter(Boolean).join('; ') : null)].filter(Boolean);\nif (request.direct_only) flights = flights.filter(flight => flight.stops === 0);\nconst maxPrice = request.max_price === null || request.max_price === undefined || request.max_price === '' ? NaN : Number(request.max_price);\nif (Number.isFinite(maxPrice)) flights = flights.filter(flight => flight.price <= maxPrice);\nflights.sort((a, b) => request.sort === 'recommended' ? (a.stops - b.stops || a.price - b.price) : a.price - b.price);\nflights = flights.slice(0, 5);\nreturn [{ json: { chat_id: request.chat_id, user_language: request.user_language || 'ar', flights, provider_errors: providerErrors, searched_at: new Date().toISOString() } }];"
+      },
+      "id": "aggregate-results",
+      "name": "Combine Provider Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const result = $input.first()?.json || {};\nconst flights = Array.isArray(result.flights) ? result.flights : [];\nconst safeFlights = flights.filter(flight => flight && Number.isFinite(Number(flight.price)) && Array.isArray(flight.segments));\nsafeFlights.sort((left, right) => Number(left.price) - Number(right.price));\nreturn [{ json: { ...result, flights: safeFlights.slice(0, 5), provider_errors: Array.isArray(result.provider_errors) ? result.provider_errors : [] } }];"
+      },
+      "id": "aggregate-results",
+      "name": "Filter and Rank Flights",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const x = $input.first().json || {};\nconst flights = Array.isArray(x.flights) ? x.flights : [];\nconst language = x.user_language || 'ar';\nconst line = '-------------------';\nlet text;\nif (!flights.length && Array.isArray(x.provider_errors) && x.provider_errors.length >= 2) {\n  text = language === 'en' ? 'Flight search is temporarily unavailable. Please try again shortly.' : 'البحث عن الرحلات غير متاح مؤقتاً. يرجى المحاولة بعد قليل.';\n} else if (!flights.length) {\n  text = language === 'en' ? 'No matching flights were found. Try another date, route, or filter.' : 'لم يتم العثور على رحلات مطابقة. جرّب تاريخاً أو مساراً أو تصفية أخرى.';\n} else {\n  const heading = language === 'en' ? '✈️ Flight results' : '✈️ نتائج الرحلات';\n  const blocks = flights.map((flight, index) => {\n    const segments = Array.isArray(flight.segments) ? flight.segments : [];\n    const first = segments[0] || {};\n    const last = segments[segments.length - 1] || first;\n    const airline = first.airline || flight.source || (language === 'en' ? 'Unknown airline' : 'شركة طيران غير معروفة');\n    const origin = first.from || x.origin_iata || '?';\n    const destination = last.to || x.destination_iata || '?';\n    const stops = flight.stops === 0 ? (language === 'en' ? 'Direct' : 'مباشرة') : `${Number(flight.stops) || 0} ${language === 'en' ? 'stop(s)' : 'توقف'}`;\n    const departure = first.departure || '?';\n    const arrival = last.arrival || '?';\n    const source = flight.source || (language === 'en' ? 'Flight provider' : 'مزود الرحلات');\n    if (language === 'en') return `${index + 1}. ✈️ ${airline} — 💰 ${flight.price ?? '?'} ${flight.currency || ''}\\n🛫 Route: ${origin} ➡️ ${destination} (${stops})\\n🕒 Departure: ${departure} | Arrival: ${arrival}\\n🔍 Source: ${source}`;\n    return `${index + 1}. ✈️ ${airline} — 💰 ${flight.price ?? '?'} ${flight.currency || ''}\\n🛫 المسار: ${origin} ⬅️ ${destination} (${stops})\\n🕒 الإقلاع: ${departure} | الوصول: ${arrival}\\n🔍 المصدر: ${source}`;\n  });\n  text = `${heading}\\n\\n${blocks.join(`\\n${line}\\n`)}\\n\\n${language === 'en' ? 'Prices and availability can change.' : 'قد تتغير الأسعار والتوافر.'}`;\n}\nreturn [{ json: { chat_id: x.chat_id, telegram_text: text } }];"
+      },
+      "id": "format-results",
+      "name": "Format Flight Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const x = $input.first().json;\nconst language = x.user_language || 'ar';\nconst text = x.parse_error ? (language === 'en' ? 'I could not understand that request. Send a route and travel date, for example: London to Paris on 2026-10-15.' : 'لم أتمكن من فهم الطلب. أرسل المسار وتاريخ السفر، مثال: من لندن إلى باريس بتاريخ 2026-10-15.') : (language === 'en' ? 'Please provide the missing details: ' : 'أرسل التفاصيل الناقصة: ') + x.missing_fields.map(field => ({origin_iata:language === 'en' ? 'origin airport/city' : 'مدينة أو رمز مطار المغادرة',destination_iata:language === 'en' ? 'destination airport/city' : 'مدينة أو رمز مطار الوصول',departure_date:language === 'en' ? 'departure date (YYYY-MM-DD)' : 'تاريخ المغادرة (YYYY-MM-DD)',return_date:language === 'en' ? 'return date (YYYY-MM-DD)' : 'تاريخ العودة (YYYY-MM-DD)'}[field] || field)).join(', ');\nreturn [{ json: { chat_id: x.chat_id, telegram_text: text } }];"
+      },
+      "id": "clarification",
+      "name": "Build Clarification Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ Number($json.chat_id ?? $('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query?.message?.chat?.id) }}",
+        "text": "={{ String($json.telegram_text ?? $json.text ?? $json.message ?? '') }}",
+        "additionalFields": {}
+      },
+      "id": "telegram-send",
+      "name": "Send Telegram Reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        80
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Telegram Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Telegram Update": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Request",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Callback Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Callback Query": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Telegram Callback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare AI Request": {
+      "main": [
+        [
+          {
+            "node": "Load Conversation Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Conversation Memory": {
+      "main": [
+        [
+          {
+            "node": "Parse Flight Request (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Flight Request (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Build Flight Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Flight Context": {
+      "main": [
+        [
+          {
+            "node": "Save and Validate Flight Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save and Validate Flight Request": {
+      "main": [
+        [
+          {
+            "node": "Request Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Ready?": {
+      "main": [
+        [
+          {
+            "node": "Search Google Flights (SerpApi)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Clarification Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Google Flights (SerpApi)": {
+      "main": [
+        [
+          {
+            "node": "Search Duffel Offers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Duffel Offers": {
+      "main": [
+        [
+          {
+            "node": "Combine Provider Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Provider Results": {
+      "main": [
+        [
+          {
+            "node": "Filter and Rank Flights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter and Rank Flights": {
+      "main": [
+        [
+          {
+            "node": "Format Flight Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Flight Results": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Clarification Reply": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
